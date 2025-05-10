@@ -6,7 +6,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 mod ssh;
