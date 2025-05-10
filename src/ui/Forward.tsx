@@ -25,7 +25,7 @@ function Forward() {
   const ChartDataMaxSize = 50;
 
   const [localIP, setLocalIP] = useState("127.0.0.1");
-  const [localPort, setLocalPort] = useState();
+  const [localPort, setLocalPort] = useState(5678);
   const [ip, setIP] = useState("");
   const [port, setPort] = useState(22);
   const [user, setUser] = useState("");
@@ -127,6 +127,34 @@ function Forward() {
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
+
+          const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+          const portRegex = /^(6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[0-9]{1,4})$/;
+          if (!ipv4Regex.test(localIP)) {
+            setErrorMsg("Invalid 'Local IP'");
+            return;
+          }
+          if (!portRegex.test(localPort.toString())) {
+            setErrorMsg("Invalid 'Local Port'");
+            return;
+          }
+          if (!ipv4Regex.test(ip)) {
+            setErrorMsg("Invalid 'Remote IP'");
+            return;
+          }
+          if (!portRegex.test(port.toString())) {
+            setErrorMsg("Invalid 'Remote Port'");
+            return;
+          }
+          if (user.length == 0) {
+            setErrorMsg("Please input 'User'");
+            return;
+          }
+          if (password.length == 0) {
+            setErrorMsg("Please input 'Password'");
+            return;
+          }
+
           if (connectStatus == ConnectStatus.Disconnected) {
             invokeForward();
           } else {
