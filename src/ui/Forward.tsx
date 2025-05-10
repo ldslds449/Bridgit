@@ -53,6 +53,11 @@ function Forward() {
     }]
   });
 
+  function showErrorMsg(msg: string) {
+    setErrorMsg(msg);
+    setTimeout(() => setErrorMsg(""), 3000);
+  }
+
   async function invokeForward() {
     console.log(`Start to connect ${user}@${ip}:${port}`);
     setconnectStatus(ConnectStatus.Connecting);
@@ -68,8 +73,7 @@ function Forward() {
       setconnectStatus(ConnectStatus.Connected);
     }).catch((error) => {
       setconnectStatus(ConnectStatus.Disconnected);
-      setErrorMsg(error);
-      setTimeout(() => setErrorMsg(""), 3000);
+      showErrorMsg(error);
     });
   }
 
@@ -131,27 +135,27 @@ function Forward() {
           const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
           const portRegex = /^(6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[0-9]{1,4})$/;
           if (!ipv4Regex.test(localIP)) {
-            setErrorMsg("Invalid 'Local IP'");
+            showErrorMsg("Invalid 'Local IP'");
             return;
           }
           if (!portRegex.test(localPort.toString())) {
-            setErrorMsg("Invalid 'Local Port'");
+            showErrorMsg("Invalid 'Local Port'");
             return;
           }
           if (!ipv4Regex.test(ip)) {
-            setErrorMsg("Invalid 'Remote IP'");
+            showErrorMsg("Invalid 'Remote IP'");
             return;
           }
           if (!portRegex.test(port.toString())) {
-            setErrorMsg("Invalid 'Remote Port'");
+            showErrorMsg("Invalid 'Remote Port'");
             return;
           }
           if (user.length == 0) {
-            setErrorMsg("Please input 'User'");
+            showErrorMsg("Please input 'User'");
             return;
           }
           if (password.length == 0) {
-            setErrorMsg("Please input 'Password'");
+            showErrorMsg("Please input 'Password'");
             return;
           }
 
