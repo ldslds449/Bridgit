@@ -127,6 +127,25 @@ test("an empty local port blocks submission instead of reusing the old value", (
   expect(hooks.slots[7]).toBe("本機 Port 必須介於 1–65535");
 });
 
+test("the redesigned jump form validates and sends separate bastion credentials", async () => {
+  let page = render(Forward);
+  for (const [label, value] of [["主機名稱 / IP", "target.internal"], ["使用者名稱", "alice"], ["登入密碼", "target-secret"]]) {
+    findElement(page, element => element.props?.label === label).props.onChange(value);
+  }
+  findElement(page, element => element.type === "input" && element.props.type === "checkbox").props.onChange({ target: { checked: true } });
+  page = render(Forward);
+  findElement(page, element => element.type === "form").props.onSubmit({ preventDefault() {} });
+  expect(ipc.invoke).not.toHaveBeenCalledWith("forward", expect.anything());
+  for (const [label, value] of [["跳板機主機", "bastion.example.com"], ["跳板機使用者", "jump-user"], ["跳板機密碼", "jump-secret"]]) {
+    findElement(page, element => element.props?.label === label).props.onChange(value);
+  }
+  findElement(render(Forward), element => element.type === "form").props.onSubmit({ preventDefault() {} });
+  await vi.waitFor(() => expect(ipc.invoke).toHaveBeenCalledWith("forward", expect.objectContaining({
+    remoteIp: "target.internal", user: "alice", password: "target-secret",
+    jump: { host: "bastion.example.com", port: 22, user: "jump-user", password: "jump-secret" },
+  })));
+});
+
 test("stop failures are shown and allow a retry", async () => {
   let state = render(useForward);
   ipc.invoke.mockRejectedValueOnce("Close failed");
@@ -163,6 +182,21 @@ test("declining a host never sends a trust retry", async () => {
   expect(render(useForward).hostKey).toBeUndefined();
   expect(render(useForward).connectStatus).toBe(ConnectStatus.Disconnected);
   expect(ipc.invoke).toHaveBeenCalledTimes(1);
+});
+
+test("jump and target host approvals stay separate across retries", async () => {
+  const jump = { host: "bastion.example.com", port: 22, user: "jump-user", password: "jump-secret" };
+  const jumpKey = { host: jump.host, port: 22, key: "jump-key", fingerprint: "SHA256:jump", is_jump: true };
+  const targetKey = { host: options.remoteIp, port: 22, key: "target-key", fingerprint: "SHA256:target", is_jump: false };
+  ipc.invoke.mockRejectedValueOnce({ host_key: jumpKey }).mockRejectedValueOnce({ host_key: targetKey });
+  await render(useForward).invokeForward({ ...options, jump });
+  expect(render(useForward).hostKey).toEqual(jumpKey);
+  await render(useForward).trustHost();
+  expect(ipc.invoke).toHaveBeenLastCalledWith("forward", { ...options, jump: { ...jump, trustedKey: jumpKey.key }, trustedKey: undefined });
+  expect(render(useForward).hostKey).toEqual(targetKey);
+  await render(useForward).trustHost();
+  expect(ipc.invoke).toHaveBeenLastCalledWith("forward", { ...options, jump: { ...jump, trustedKey: jumpKey.key }, trustedKey: targetKey.key });
+  expect(render(useForward).connectStatus).toBe(ConnectStatus.Connected);
 });
 
 test("tunnel errors retain the connection; SSH shutdown resets it", async () => {

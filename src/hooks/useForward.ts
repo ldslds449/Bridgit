@@ -10,7 +10,7 @@ export enum ConnectStatus {
 }
 
 type TransferUpdatePayload = { send_bytes: number; recv_bytes: number };
-type HostKey = { host: string; port: number; key: string; fingerprint: string };
+type HostKey = { host: string; port: number; key: string; fingerprint: string; is_jump?: boolean };
 type ConnectError = { message: string; host_key?: HostKey | null };
 type ForwardOptions = {
   localIp: string;
@@ -24,6 +24,7 @@ type ForwardOptions = {
   passphrase?: string;
   targetHost?: string;
   targetPort?: number;
+  jump?: { host: string; port: number; user: string; password: string; trustedKey?: string };
 };
 
 function errorMessage(error: unknown): string {
@@ -103,7 +104,11 @@ export function useForward() {
     busy.current = true;
     const { options, key } = pendingHost;
     setPendingHost(null);
-    await start(options, key.key);
+    if (key.is_jump && options.jump) {
+      await start({ ...options, jump: { ...options.jump, trustedKey: key.key } });
+    } else {
+      await start(options, key.key);
+    }
   }
 
   function rejectHost() {

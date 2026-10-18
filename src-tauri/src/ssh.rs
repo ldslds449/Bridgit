@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use russh::keys::{self, ssh_key, PublicKeyOrCertificate};
 use russh::{client, ChannelMsg, Disconnect};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ pub(crate) struct HostKeyRequired {
     pub port: u16,
     pub key: String,
     pub fingerprint: String,
+    pub is_jump: bool,
 }
 
 impl std::fmt::Display for HostKeyRequired {
@@ -102,6 +103,7 @@ fn verify_host_key(
     let public_key = key.to_openssh()?;
     if approved != Some(public_key.as_str()) {
         return Err(HostKeyRequired {
+            is_jump: false,
             host: host.into(),
             port,
             key: public_key,
@@ -127,8 +129,19 @@ fn verify_host_key(
     Ok(())
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JumpHost {
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    trusted_key: Option<String>,
+}
+
 pub struct Session {
     session: client::Handle<Client>,
+    jump: Option<client::Handle<Client>>,
 }
 
 impl Session {
@@ -154,48 +167,11 @@ impl Session {
                 trusted_key,
             };
             let mut session = client::connect(config, (host, port), handler).await?;
-            let mut authenticated = false;
-            let mut key_error = None;
-            for path in identity_files {
-                let key = match keys::load_secret_key(
-                    path,
-                    if passphrase.is_empty() {
-                        None
-                    } else {
-                        Some(passphrase)
-                    },
-                ) {
-                    Ok(key) => key,
-                    Err(error) => {
-                        key_error = Some(format!("{path}: {error}"));
-                        continue;
-                    }
-                };
-                let hash = session.best_supported_rsa_hash().await?.flatten();
-                if session
-                    .authenticate_publickey(
-                        user,
-                        keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash),
-                    )
-                    .await?
-                    .success()
-                {
-                    authenticated = true;
-                    break;
-                }
-            }
-            if !authenticated && !password.is_empty() {
-                authenticated = session
-                    .authenticate_password(user, password)
-                    .await?
-                    .success();
-            }
-            anyhow::ensure!(
-                authenticated,
-                "Authentication failed{}",
-                key_error.map(|e| format!(": {e}")).unwrap_or_default()
-            );
-            Ok(Self { session })
+            Self::authenticate(&mut session, user, password, identity_files, passphrase).await?;
+            Ok::<_, anyhow::Error>(Self {
+                session,
+                jump: None,
+            })
         })
         .await;
         match result {
@@ -204,8 +180,141 @@ impl Session {
         }
     }
 
+    async fn authenticate(
+        session: &mut client::Handle<Client>,
+        user: &str,
+        password: &str,
+        identity_files: &[String],
+        passphrase: &str,
+    ) -> Result<()> {
+        let mut authenticated = false;
+        let mut key_error = None;
+        for path in identity_files {
+            let key = match keys::load_secret_key(
+                path,
+                if passphrase.is_empty() {
+                    None
+                } else {
+                    Some(passphrase)
+                },
+            ) {
+                Ok(key) => key,
+                Err(error) => {
+                    key_error = Some(format!("{path}: {error}"));
+                    continue;
+                }
+            };
+            let hash = session.best_supported_rsa_hash().await?.flatten();
+            if session
+                .authenticate_publickey(user, keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+                .await?
+                .success()
+            {
+                authenticated = true;
+                break;
+            }
+        }
+        if !authenticated && !password.is_empty() {
+            authenticated = session
+                .authenticate_password(user, password)
+                .await?
+                .success();
+        }
+        anyhow::ensure!(
+            authenticated,
+            "Authentication failed{}",
+            key_error.map(|e| format!(": {e}")).unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn connect_via(
+        user: &str,
+        password: &str,
+        (host, port): (&str, u16),
+        known_hosts: PathBuf,
+        trusted_key: Option<String>,
+        identity_files: &[String],
+        passphrase: &str,
+        jump: Option<JumpHost>,
+    ) -> Result<Self, ConnectError> {
+        let Some(jump) = jump else {
+            return Self::connect(
+                user,
+                password,
+                (host, port),
+                known_hosts,
+                trusted_key,
+                identity_files,
+                passphrase,
+            )
+            .await;
+        };
+        if jump.host.trim().is_empty()
+            || jump.port == 0
+            || jump.user.is_empty()
+            || jump.password.is_empty()
+        {
+            return Err(ConnectError::message(
+                "Jump host, port, user and password are required",
+            ));
+        }
+        let outer = Self::connect(
+            &jump.user,
+            &jump.password,
+            (&jump.host, jump.port),
+            known_hosts.clone(),
+            jump.trusted_key,
+            &[],
+            "",
+        )
+        .await
+        .map_err(|mut error| {
+            if let Some(key) = error.host_key.as_mut() {
+                key.is_jump = true;
+            }
+            error.message = format!("Jump host: {}", error.message);
+            error
+        })?;
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let channel = outer
+                .session
+                .channel_open_direct_tcpip(host, port.into(), "127.0.0.1", 0)
+                .await?;
+            let config = Arc::new(client::Config {
+                keepalive_interval: Some(Duration::from_secs(10)),
+                keepalive_max: 3,
+                ..Default::default()
+            });
+            let handler = Client {
+                host: host.into(),
+                port,
+                known_hosts,
+                trusted_key,
+            };
+            let mut session =
+                client::connect_stream(config, channel.into_stream(), handler).await?;
+            Self::authenticate(&mut session, user, password, identity_files, passphrase).await?;
+            Ok::<_, anyhow::Error>(session)
+        })
+        .await;
+        match result {
+            Ok(Ok(session)) => Ok(Self {
+                session,
+                jump: Some(outer.session),
+            }),
+            error => {
+                let _ = outer.close().await;
+                Err(match error {
+                    Ok(Err(error)) => ConnectError::from(error),
+                    _ => ConnectError::message("Target SSH connection timed out"),
+                })
+            }
+        }
+    }
+
     pub fn is_closed(&self) -> bool {
-        self.session.is_closed()
+        self.session.is_closed() || self.jump.as_ref().is_some_and(|jump| jump.is_closed())
     }
 
     pub async fn call(&self, command: &str) -> Result<String> {
@@ -318,15 +427,29 @@ impl Session {
     }
 
     pub async fn close(&self) -> Result<()> {
-        if self.is_closed() {
-            return Ok(());
-        }
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.session.disconnect(Disconnect::ByApplication, "", ""),
-        )
-        .await
-        .context("SSH disconnect timed out")??;
+        let target = if self.session.is_closed() {
+            Ok(())
+        } else {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                self.session.disconnect(Disconnect::ByApplication, "", ""),
+            )
+            .await
+            .context("SSH disconnect timed out")
+            .and_then(|result| result.map_err(anyhow::Error::from))
+        };
+        let jump = if let Some(jump) = self.jump.as_ref().filter(|jump| !jump.is_closed()) {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                jump.disconnect(Disconnect::ByApplication, "", ""),
+            )
+            .await
+            .context("Jump host disconnect timed out")
+            .and_then(|result| result.map_err(anyhow::Error::from))
+        } else {
+            Ok(())
+        };
+        target.and(jump)?;
         Ok(())
     }
 }
@@ -599,6 +722,166 @@ mod tests {
         .expect("local SSH identity test timed out");
     }
 
+    struct JumpServer(Arc<AtomicU64>);
+
+    impl server::Handler for JumpServer {
+        type Error = anyhow::Error;
+
+        async fn auth_password(&mut self, user: &str, password: &str) -> Result<server::Auth> {
+            anyhow::ensure!(
+                user == "jump-user" && password == "jump-password",
+                "Wrong jump credentials"
+            );
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(server::Auth::Accept)
+        }
+
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: russh::Channel<server::Msg>,
+            host: &str,
+            port: u32,
+            _origin: &str,
+            _origin_port: u32,
+            reply: server::ChannelOpenHandle,
+            _session: &mut server::Session,
+        ) -> Result<()> {
+            let mut socket = TcpStream::connect((host, u16::try_from(port)?)).await?;
+            reply.accept().await;
+            tokio::spawn(async move {
+                let _ =
+                    tokio::io::copy_bidirectional(&mut channel.into_stream(), &mut socket).await;
+            });
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn jump_requires_both_host_approvals_before_each_password() {
+        let file = TestFile::new();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target_listener.local_addr().unwrap().port();
+        let jump_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jump_port = jump_listener.local_addr().unwrap().port();
+        let target_key = test_key(7);
+        let target_public = target_key.public_key().to_openssh().unwrap();
+        let jump_key = test_key(8);
+        let jump_public = jump_key.public_key().to_openssh().unwrap();
+        let target_auth = Arc::new(AtomicU64::new(0));
+        let jump_auth = Arc::new(AtomicU64::new(0));
+        let target_count = target_auth.clone();
+        let jump_count = jump_auth.clone();
+        let target_server = tokio::spawn(async move {
+            let config = Arc::new(server::Config {
+                keys: vec![target_key],
+                ..Default::default()
+            });
+            let mut sessions = tokio::task::JoinSet::new();
+            loop {
+                let (socket, _) = target_listener.accept().await.unwrap();
+                let config = config.clone();
+                let count = target_count.clone();
+                sessions.spawn(async move {
+                    if let Ok(session) =
+                        server::run_stream(config, socket, TestServer(count, None)).await
+                    {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+        let jump_server = tokio::spawn(async move {
+            let config = Arc::new(server::Config {
+                keys: vec![jump_key],
+                ..Default::default()
+            });
+            let mut sessions = tokio::task::JoinSet::new();
+            loop {
+                let (socket, _) = jump_listener.accept().await.unwrap();
+                let config = config.clone();
+                let count = jump_count.clone();
+                sessions.spawn(async move {
+                    if let Ok(session) = server::run_stream(config, socket, JumpServer(count)).await
+                    {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+        let mut jump = JumpHost {
+            host: "127.0.0.1".into(),
+            port: jump_port,
+            user: "jump-user".into(),
+            password: "jump-password".into(),
+            trusted_key: None,
+        };
+        let first = Session::connect_via(
+            "target-user",
+            "target-password",
+            ("127.0.0.1", target_port),
+            file.0.clone(),
+            None,
+            &[],
+            "",
+            Some(jump.clone()),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(first.host_key.as_ref().unwrap().is_jump);
+        assert_eq!(first.host_key.unwrap().key, jump_public);
+        assert_eq!(jump_auth.load(Ordering::Relaxed), 0);
+        assert_eq!(target_auth.load(Ordering::Relaxed), 0);
+        jump.trusted_key = Some(jump_public);
+        let second = Session::connect_via(
+            "target-user",
+            "target-password",
+            ("127.0.0.1", target_port),
+            file.0.clone(),
+            None,
+            &[],
+            "",
+            Some(jump.clone()),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(!second.host_key.as_ref().unwrap().is_jump);
+        assert_eq!(second.host_key.unwrap().key, target_public);
+        assert_eq!(jump_auth.load(Ordering::Relaxed), 1);
+        assert_eq!(target_auth.load(Ordering::Relaxed), 0);
+        let session = Session::connect_via(
+            "target-user",
+            "target-password",
+            ("127.0.0.1", target_port),
+            file.0.clone(),
+            Some(target_public),
+            &[],
+            "",
+            Some(jump),
+        )
+        .await
+        .unwrap();
+        assert_eq!(jump_auth.load(Ordering::Relaxed), 2);
+        assert_eq!(target_auth.load(Ordering::Relaxed), 1);
+        assert!(!session.is_closed());
+        let channel = session
+            .session
+            .channel_open_direct_tcpip("127.0.0.1", 1234, "127.0.0.1", 0)
+            .await
+            .unwrap();
+        let mut stream = channel.into_stream();
+        stream.write_all(b"through jump").await.unwrap();
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut output))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(output, b"through jump");
+        session.close().await.unwrap();
+        target_server.abort();
+        jump_server.abort();
+    }
     impl server::Handler for TestServer {
         type Error = anyhow::Error;
         async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<server::Auth> {

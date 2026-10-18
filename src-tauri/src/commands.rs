@@ -114,6 +114,7 @@ pub(crate) async fn connect(
     user: &str,
     password: &str,
     trusted_key: Option<String>,
+    jump: Option<ssh::JumpHost>,
     alias: Option<String>,
     identity_file: Option<String>,
     passphrase: Option<String>,
@@ -128,10 +129,10 @@ pub(crate) async fn connect(
         return Err(ConnectError::message("Stop forwarding before connecting"));
     }
     runtime.stop().await.map_err(ConnectError::message)?;
-    let path = ssh_files::path("known_hosts")
-        .map_err(|error| ConnectError::message(error.to_string()))?;
+    let path =
+        ssh_files::path("known_hosts").map_err(|error| ConnectError::message(error.to_string()))?;
     let resolved = connection_settings(ip, port, user, alias, identity_file)?;
-    let session = ssh::Session::connect(
+    let session = ssh::Session::connect_via(
         &resolved.user,
         password,
         (&resolved.host, resolved.port),
@@ -139,6 +140,7 @@ pub(crate) async fn connect(
         trusted_key,
         &resolved.identity_files,
         passphrase.as_deref().unwrap_or(""),
+        jump,
     )
     .await?;
     runtime.session = Some(Arc::new(session));
@@ -172,6 +174,7 @@ pub(crate) async fn forward(
     user: &str,
     password: &str,
     trusted_key: Option<String>,
+    jump: Option<ssh::JumpHost>,
     alias: Option<String>,
     identity_file: Option<String>,
     passphrase: Option<String>,
@@ -206,8 +209,8 @@ pub(crate) async fn forward(
             "Remote port, user and password are required",
         ));
     }
-    let path = ssh_files::path("known_hosts")
-        .map_err(|error| ConnectError::message(error.to_string()))?;
+    let path =
+        ssh_files::path("known_hosts").map_err(|error| ConnectError::message(error.to_string()))?;
     let (listener, session) = prepare_forward(
         (local_ip, local_port),
         (&resolved.host, resolved.port),
@@ -217,6 +220,7 @@ pub(crate) async fn forward(
         trusted_key,
         &resolved.identity_files,
         passphrase.as_deref().unwrap_or(""),
+        jump,
     )
     .await?;
     let cancel = CancellationToken::new();
@@ -241,12 +245,13 @@ pub(crate) async fn prepare_forward(
     trusted_key: Option<String>,
     identity_files: &[String],
     passphrase: &str,
+    jump: Option<ssh::JumpHost>,
 ) -> Result<(TcpListener, Arc<ssh::Session>), ConnectError> {
     let listener = TcpListener::bind(local)
         .await
         .map_err(|error| ConnectError::message(format!("TCP Bind Error: {error}")))?;
     let session = Arc::new(
-        ssh::Session::connect(
+        ssh::Session::connect_via(
             user,
             password,
             remote,
@@ -254,6 +259,7 @@ pub(crate) async fn prepare_forward(
             trusted_key,
             identity_files,
             passphrase,
+            jump,
         )
         .await?,
     );
@@ -368,6 +374,7 @@ mod tests {
             None,
             &[],
             "",
+            None,
         )
         .await
         .err()
@@ -383,6 +390,7 @@ mod tests {
             None,
             &[],
             "",
+            None,
         )
         .await
         .err()

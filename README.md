@@ -39,6 +39,8 @@ The IPC command names and event payloads are the boundary between the frontend h
 
 ## SSH host trust and lifecycle
 
+Enable **使用跳板機** to reach the target SSH server through one bastion. Enter the bastion hostname, port, username, and password separately from the target credentials. Both servers require their own host fingerprint approval. Passwords are not saved to disk. Stopping forwarding closes both SSH connections; failure to establish the target also closes the bastion connection. This supports one jump host with password authentication, without agent forwarding. The target SSH server supports the existing password or private-key authentication and separate forwarding destination settings.
+
 The first connection shows a SHA-256 host fingerprint. Verify it with the server administrator before choosing **Trust and connect**. Cancel sends no password. Approval applies to that exact public key; a different key on retry requires confirmation again.
 
 Trusted keys are read from and saved to `~/.ssh/known_hosts` (on Windows, `%USERPROFILE%/.ssh/known_hosts`), shared with the current user?s OpenSSH client. A changed key is rejected even when supplied as a trusted key. For a legitimate key rotation, verify the replacement outside this application, stop forwarding, then reset the corresponding entry in the Known Hosts page and reconnect.

@@ -26,6 +26,11 @@ function Forward({ revision = 0, active = true }: { revision?: number; active?: 
   const [targetHost, setTargetHost] = useState("127.0.0.1");
   const [targetPort, setTargetPort] = useState("5432");
   const [configError, setConfigError] = useState("");
+  const [useJump, setUseJump] = useState(false);
+  const [jumpHost, setJumpHost] = useState("");
+  const [jumpPort, setJumpPort] = useState("22");
+  const [jumpUser, setJumpUser] = useState("");
+  const [jumpPassword, setJumpPassword] = useState("");
   const connected = connectStatus === ConnectStatus.Connected;
   const busy = connectStatus === ConnectStatus.Connecting || connectStatus === ConnectStatus.Stopping;
   const editable = connectStatus === ConnectStatus.Disconnected;
@@ -47,7 +52,7 @@ function Forward({ revision = 0, active = true }: { revision?: number; active?: 
     return () => { disposed = true; };
   }, [alias, revision, active, editable]);
   useEffect(() => {
-    if (connected) { setPassword(""); setPassphrase(""); }
+    if (connected) { setPassword(""); setPassphrase(""); setJumpPassword(""); }
   }, [connected]);
 
   const hostOptions = [{ id: "manual", label: "手動輸入連線資訊" }, ...[...new Set(hosts.map(host => host.name))].map(name => ({ id: `host:${name}`, label: name }))];
@@ -68,6 +73,7 @@ function Forward({ revision = 0, active = true }: { revision?: number; active?: 
     <div className="route-strip" aria-label="轉發連線路徑">
       <div className="route-node"><span className="route-icon"><Laptop size={17} /></span><div><small>本機監聽</small><code>{localIP || "localhost"}:{localPort || "—"}</code></div></div>
       <ArrowRight className="route-arrow" size={16} />
+      {useJump && <><div className="route-node"><span className="route-icon"><Network size={17} /></span><div><small>跳板機</small><code>{jumpHost || "尚未設定"}:{jumpPort}</code></div></div><ArrowRight className="route-arrow" size={16} /></>}
       <div className="route-node"><span className="route-icon"><ShieldCheck size={17} /></span><div><small>SSH 安全通道</small><code>{sshHost ? `${sshHost}:${sshPort}` : "尚未設定伺服器"}</code></div></div>
       <ArrowRight className="route-arrow" size={16} />
       <div className="route-node"><span className="route-icon"><Server size={17} /></span><div><small>轉發目的地</small><code>{targetHost || "—"}:{targetPort || "—"}</code></div></div>
@@ -86,7 +92,10 @@ function Forward({ revision = 0, active = true }: { revision?: number; active?: 
         if (alias && !resolved) { showErrorMsg(configError || "正在解析 SSH Config"); return; }
         if (!targetHost.trim() || !validPort(targetPort)) { showErrorMsg("請輸入有效的轉發目的主機與 Port"); return; }
         if (!password && !identity) { showErrorMsg("請輸入密碼或指定私鑰"); return; }
-        void invokeForward({ localIp: localIP, localPort: Number(localPort), remoteIp: ip, remotePort: Number(port), user, password, alias: alias || null, identityFile: identityFile || null, passphrase, targetHost, targetPort: Number(targetPort) });
+        if (useJump && (!jumpHost.trim() || /[\r\n\0]/.test(jumpHost) || !validPort(jumpPort) || !jumpUser.trim() || !jumpPassword)) {
+          showErrorMsg("請輸入跳板機主機、有效的 Port、使用者名稱與密碼"); return;
+        }
+        void invokeForward({ localIp: localIP, localPort: Number(localPort), remoteIp: ip, remotePort: Number(port), user, password, alias: alias || null, identityFile: identityFile || null, passphrase, targetHost, targetPort: Number(targetPort), ...(useJump ? { jump: { host: jumpHost.trim(), port: Number(jumpPort), user: jumpUser, password: jumpPassword } } : {}) });
       }}>
         <Card className="panel">
           <div className="panel-header"><h2 className="panel-title"><Cable size={16} />連線設定</h2><Chip size="sm" variant="soft">LOCAL FORWARD</Chip></div>
@@ -102,6 +111,16 @@ function Forward({ revision = 0, active = true }: { revision?: number; active?: 
                 <Input label="使用者名稱" value={user} placeholder="root" onChange={setUser} disabled={!editable} /><Input label="私鑰路徑（選填）" value={identityFile} placeholder="~/.ssh/id_ed25519" onChange={setIdentityFile} disabled={!editable} />
               </div>}
               <div className="fields-grid mt-4"><Input label="登入密碼" value={password} placeholder={identity ? "使用私鑰時可留空" : "輸入 SSH 密碼"} type="password" onChange={setPassword} disabled={!editable} /><Input label="私鑰密語（選填）" value={passphrase} placeholder="加密私鑰使用" type="password" onChange={setPassphrase} disabled={!editable} /></div>
+            </fieldset>
+            <fieldset aria-label="跳板機" className="field-section" disabled={!editable}>
+              <div className="section-label"><Network size={16} />跳板機<small>JUMP HOST</small></div>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={useJump} disabled={!editable} onChange={e => setUseJump(e.target.checked)} />使用跳板機</label>
+              {useJump && <div className="fields-grid mt-4">
+                <Input label="跳板機主機" value={jumpHost} placeholder="bastion.example.com" onChange={setJumpHost} disabled={!editable} />
+                <Input label="跳板機 Port" value={jumpPort} placeholder="22" onChange={setJumpPort} disabled={!editable} />
+                <Input label="跳板機使用者" value={jumpUser} placeholder="user" onChange={setJumpUser} disabled={!editable} />
+                <Input label="跳板機密碼" value={jumpPassword} placeholder="輸入跳板機密碼" type="password" onChange={setJumpPassword} disabled={!editable} />
+              </div>}
             </fieldset>
             <fieldset aria-label="轉發目的地" className="field-section" disabled={!editable}><div className="section-label"><span className="step-number">03</span>轉發目的地<small>REMOTE SERVICE</small></div>
               <div className="fields-grid"><Input label="目的主機" value={targetHost} placeholder="127.0.0.1" onChange={setTargetHost} disabled={!editable} /><Input label="目的 Port" value={targetPort} placeholder="5432" onChange={setTargetPort} disabled={!editable} /></div>
@@ -126,7 +145,7 @@ function Forward({ revision = 0, active = true }: { revision?: number; active?: 
       </aside>
     </div>
     <Modal.Backdrop isOpen={!!hostKey} isDismissable={false} onOpenChange={open => { if (!open) rejectHost(); }}><Modal.Container size="md"><Modal.Dialog>
-      <Modal.Header><div className="modal-symbol"><ShieldCheck /></div><Modal.Heading>確認 SSH 主機身分</Modal.Heading></Modal.Header>
+      <Modal.Header><div className="modal-symbol"><ShieldCheck /></div><Modal.Heading>{hostKey?.is_jump ? "確認跳板機身分" : "確認 SSH 主機身分"}</Modal.Heading></Modal.Header>
       <Modal.Body><p className="muted">首次連線至 <strong>{hostKey?.host}:{hostKey?.port}</strong>。請向伺服器管理者核對以下指紋。</p><pre className="confirmation-details">{hostKey?.fingerprint}</pre><p className="muted">確認後將儲存此主機金鑰，再繼續登入。</p></Modal.Body>
       <Modal.Footer><Button text="取消連線" variant="tertiary" onClick={rejectHost} /><Button text="信任並連線" variant="primary" icon={<ShieldCheck size={15} />} onClick={() => void trustHost()} /></Modal.Footer>
     </Modal.Dialog></Modal.Container></Modal.Backdrop>
