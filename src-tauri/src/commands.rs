@@ -1,16 +1,53 @@
 use serde::Serialize;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::ssh::{self, ConnectError};
+use crate::ssh_files::{self, ResolvedHost};
+
+fn connection_settings(
+    ip: &str,
+    port: u16,
+    user: &str,
+    alias: Option<String>,
+    identity_file: Option<String>,
+) -> Result<ResolvedHost, ConnectError> {
+    let resolved = if let Some(alias) = alias.filter(|a| !a.is_empty()) {
+        ssh_files::resolve_ssh_host(alias).map_err(ConnectError::message)?
+    } else {
+        let mut identities = Vec::new();
+        if let Some(identity) = identity_file.filter(|p| !p.is_empty()) {
+            identities.push(
+                if identity.starts_with("~/") || identity.starts_with("~\\") {
+                    ssh_files::home()
+                        .map_err(|e| ConnectError::message(e.to_string()))?
+                        .join(&identity[2..])
+                        .display()
+                        .to_string()
+                } else {
+                    identity
+                },
+            );
+        }
+        ResolvedHost {
+            host: ip.into(),
+            port,
+            user: user.into(),
+            identity_files: identities,
+        }
+    };
+    if resolved.host.trim().is_empty() || resolved.user.trim().is_empty() || resolved.port == 0 {
+        return Err(ConnectError::message("請填寫有效 SSH 主機、帳號與 Port"));
+    }
+    Ok(resolved)
+}
 
 #[derive(Default)]
 pub(crate) struct SshState(Mutex<Runtime>);
@@ -77,8 +114,10 @@ pub(crate) async fn connect(
     user: &str,
     password: &str,
     trusted_key: Option<String>,
+    alias: Option<String>,
+    identity_file: Option<String>,
+    passphrase: Option<String>,
     state: tauri::State<'_, SshState>,
-    app: AppHandle,
 ) -> Result<String, ConnectError> {
     let mut runtime = state.0.lock().await;
     if runtime
@@ -89,12 +128,19 @@ pub(crate) async fn connect(
         return Err(ConnectError::message("Stop forwarding before connecting"));
     }
     runtime.stop().await.map_err(ConnectError::message)?;
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| ConnectError::message(error.to_string()))?
-        .join("known_hosts");
-    let session = ssh::Session::connect(user, password, (ip, port), path, trusted_key).await?;
+    let path = ssh_files::path("known_hosts")
+        .map_err(|error| ConnectError::message(error.to_string()))?;
+    let resolved = connection_settings(ip, port, user, alias, identity_file)?;
+    let session = ssh::Session::connect(
+        &resolved.user,
+        password,
+        (&resolved.host, resolved.port),
+        path,
+        trusted_key,
+        &resolved.identity_files,
+        passphrase.as_deref().unwrap_or(""),
+    )
+    .await?;
     runtime.session = Some(Arc::new(session));
     Ok("Connected".into())
 }
@@ -126,6 +172,11 @@ pub(crate) async fn forward(
     user: &str,
     password: &str,
     trusted_key: Option<String>,
+    alias: Option<String>,
+    identity_file: Option<String>,
+    passphrase: Option<String>,
+    target_host: Option<String>,
+    target_port: Option<u16>,
     state: tauri::State<'_, SshState>,
     app: AppHandle,
 ) -> Result<(), ConnectError> {
@@ -138,33 +189,41 @@ pub(crate) async fn forward(
         return Err(ConnectError::message("Forward already in progress"));
     }
     runtime.stop().await.map_err(ConnectError::message)?;
-    let remote_addr: SocketAddr = format!("{remote_ip}:{remote_port}")
-        .parse()
-        .map_err(|error| ConnectError::message(format!("Invalid remote address: {error}")))?;
-    if remote_port == 0 || user.is_empty() || password.is_empty() {
+    let resolved = connection_settings(remote_ip, remote_port, user, alias, identity_file)?;
+    let target = (
+        target_host.unwrap_or_else(|| remote_ip.into()),
+        target_port.unwrap_or(remote_port),
+    );
+    if target.0.trim().is_empty()
+        || target.0.contains(['\0', '\n', '\r'])
+        || target.1 == 0
+        || local_port == 0
+    {
+        return Err(ConnectError::message("請填寫有效的轉發目的地與 Port"));
+    }
+    if password.is_empty() && resolved.identity_files.is_empty() {
         return Err(ConnectError::message(
             "Remote port, user and password are required",
         ));
     }
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| ConnectError::message(error.to_string()))?
-        .join("known_hosts");
+    let path = ssh_files::path("known_hosts")
+        .map_err(|error| ConnectError::message(error.to_string()))?;
     let (listener, session) = prepare_forward(
         (local_ip, local_port),
-        (remote_ip, remote_port),
-        user,
+        (&resolved.host, resolved.port),
+        &resolved.user,
         password,
         path,
         trusted_key,
+        &resolved.identity_files,
+        passphrase.as_deref().unwrap_or(""),
     )
     .await?;
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(run_forward(
         listener,
         session.clone(),
-        remote_addr,
+        target,
         cancel.clone(),
         app,
     ));
@@ -180,19 +239,31 @@ pub(crate) async fn prepare_forward(
     password: &str,
     known_hosts: PathBuf,
     trusted_key: Option<String>,
+    identity_files: &[String],
+    passphrase: &str,
 ) -> Result<(TcpListener, Arc<ssh::Session>), ConnectError> {
     let listener = TcpListener::bind(local)
         .await
         .map_err(|error| ConnectError::message(format!("TCP Bind Error: {error}")))?;
-    let session =
-        Arc::new(ssh::Session::connect(user, password, remote, known_hosts, trusted_key).await?);
+    let session = Arc::new(
+        ssh::Session::connect(
+            user,
+            password,
+            remote,
+            known_hosts,
+            trusted_key,
+            identity_files,
+            passphrase,
+        )
+        .await?,
+    );
     Ok((listener, session))
 }
 
 async fn run_forward(
     listener: TcpListener,
     session: Arc<ssh::Session>,
-    remote_addr: SocketAddr,
+    remote_addr: (String, u16),
     cancel: CancellationToken,
     app: AppHandle,
 ) {
@@ -225,6 +296,7 @@ async fn run_forward(
                         let session = session.clone();
                         let send = traffic.send.clone();
                         let recv = traffic.recv.clone();
+                        let remote_addr = remote_addr.clone();
                         connections.spawn(async move {
                             session.forward(socket, origin, remote_addr, send, recv).await.map_err(|error| error.to_string())
                         });
@@ -294,6 +366,8 @@ mod tests {
             "secret",
             path.clone(),
             None,
+            &[],
+            "",
         )
         .await
         .err()
@@ -307,6 +381,8 @@ mod tests {
             "secret",
             path,
             None,
+            &[],
+            "",
         )
         .await
         .err()

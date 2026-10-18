@@ -1,49 +1,20 @@
-import styled from "styled-components";
-
-const StyledLabel = styled.label`
-    display: inline-block;
-    padding: 10px;
-    min-width: 100px;
-`;
-
-const StyledInput = styled.input`
-    border-radius: 8px;
-    border: 1px solid transparent;
-    padding: 0.6em 1.2em;
-    font-size: 1em;
-    font-weight: 500;
-    font-family: inherit;
-    color: #0f0f0f;
-    background-color: #ffffff;
-    transition: border-color 0.25s;
-    box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-    outline: none;
-    width: 150px;
-
-    @media (prefers-color-scheme: dark) {
-        color: #ffffff;
-        background-color: #0f0f0f98;
-    }
-`;
+import { Description, Input as HeroInput, Label, TextField } from "@heroui/react";
 
 type InputProps = {
-    label: string;
-    value: string;
-    placeholder: string;
-    type: string;
-    onChange: (arg: string) => void;
-}
+  label: string;
+  value: string;
+  placeholder: string;
+  type?: "text" | "password" | "number";
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  description?: string;
+  className?: string;
+};
 
-export default function Input({ label, value, placeholder, type, onChange }: InputProps) {
-    return (
-        <div style={{ display: "inline-block" }}>
-            <StyledLabel>{label}</StyledLabel>
-            <StyledInput
-                onChange={(e) => onChange(e.currentTarget.value)}
-                placeholder={placeholder}
-                value={value}
-                type={type}
-            />
-        </div>
-    );
+export default function Input({ label, value, placeholder, type = "text", onChange, disabled, description, className }: InputProps) {
+  return <TextField className={`app-field ${className ?? ""}`} value={value} onChange={onChange} type={type} isDisabled={disabled}>
+    <Label>{label}</Label>
+    <HeroInput placeholder={placeholder} autoComplete={type === "password" ? "off" : undefined} />
+    {description && <Description>{description}</Description>}
+  </TextField>;
 }

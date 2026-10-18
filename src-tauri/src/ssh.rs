@@ -138,6 +138,8 @@ impl Session {
         (host, port): (&str, u16),
         known_hosts: PathBuf,
         trusted_key: Option<String>,
+        identity_files: &[String],
+        passphrase: &str,
     ) -> Result<Self, ConnectError> {
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             let config = Arc::new(client::Config {
@@ -152,8 +154,47 @@ impl Session {
                 trusted_key,
             };
             let mut session = client::connect(config, (host, port), handler).await?;
-            let auth = session.authenticate_password(user, password).await?;
-            anyhow::ensure!(auth.success(), "Password authentication failed");
+            let mut authenticated = false;
+            let mut key_error = None;
+            for path in identity_files {
+                let key = match keys::load_secret_key(
+                    path,
+                    if passphrase.is_empty() {
+                        None
+                    } else {
+                        Some(passphrase)
+                    },
+                ) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        key_error = Some(format!("{path}: {error}"));
+                        continue;
+                    }
+                };
+                let hash = session.best_supported_rsa_hash().await?.flatten();
+                if session
+                    .authenticate_publickey(
+                        user,
+                        keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                    )
+                    .await?
+                    .success()
+                {
+                    authenticated = true;
+                    break;
+                }
+            }
+            if !authenticated && !password.is_empty() {
+                authenticated = session
+                    .authenticate_password(user, password)
+                    .await?
+                    .success();
+            }
+            anyhow::ensure!(
+                authenticated,
+                "Authentication failed{}",
+                key_error.map(|e| format!(": {e}")).unwrap_or_default()
+            );
             Ok(Self { session })
         })
         .await;
@@ -199,15 +240,15 @@ impl Session {
         &self,
         mut stream: TcpStream,
         originator_addr: SocketAddr,
-        forward_addr: SocketAddr,
+        forward_addr: (String, u16),
         send_bytes: Arc<AtomicU64>,
         recv_bytes: Arc<AtomicU64>,
     ) -> Result<()> {
         let channel = self
             .session
             .channel_open_direct_tcpip(
-                forward_addr.ip().to_string(),
-                forward_addr.port().into(),
+                forward_addr.0,
+                forward_addr.1.into(),
                 originator_addr.ip().to_string(),
                 originator_addr.port().into(),
             )
@@ -425,6 +466,139 @@ mod tests {
         Arc<AtomicU64>,
         Option<tokio::sync::mpsc::UnboundedSender<Result<usize, String>>>,
     );
+
+    #[tokio::test]
+    async fn encrypted_identity_authentication_and_hostname_forwarding() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            struct IdentityServer(ssh_key::PublicKey);
+            impl server::Handler for IdentityServer {
+                type Error = anyhow::Error;
+                async fn auth_publickey(
+                    &mut self,
+                    user: &str,
+                    key: &ssh_key::PublicKey,
+                ) -> Result<server::Auth> {
+                    Ok(if user == "tester" && key.key_data() == self.0.key_data() {
+                        server::Auth::Accept
+                    } else {
+                        server::Auth::reject()
+                    })
+                }
+                async fn channel_open_direct_tcpip(
+                    &mut self,
+                    channel: russh::Channel<server::Msg>,
+                    host: &str,
+                    port: u32,
+                    _: &str,
+                    _: u32,
+                    reply: server::ChannelOpenHandle,
+                    _: &mut server::Session,
+                ) -> Result<()> {
+                    assert_eq!((host, port), ("database.internal", 5432));
+                    reply.accept().await;
+                    tokio::spawn(async move {
+                        let mut stream = channel.into_stream();
+                        stream.write_all(b"forwarded").await.unwrap();
+                        stream.shutdown().await.unwrap();
+                    });
+                    Ok(())
+                }
+            }
+            let file = TestFile::new();
+            std::fs::create_dir_all(file.0.parent().unwrap()).unwrap();
+            let identity = file.0.with_file_name("id_ed25519");
+            let mut keygen = std::process::Command::new("ssh-keygen");
+            keygen
+                .args(["-q", "-t", "ed25519", "-N", "test-passphrase", "-f"])
+                .arg(&identity);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                keygen.creation_flags(0x08000000);
+            }
+            assert!(keygen.output().unwrap().status.success());
+            let mut key = keys::load_secret_key(&identity, Some("test-passphrase")).unwrap();
+            key.set_comment("");
+            let public = key.public_key().to_openssh().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let config = Arc::new(server::Config {
+                keys: vec![key.clone()],
+                ..Default::default()
+            });
+            let server = tokio::spawn(async move {
+                let mut sessions = tokio::task::JoinSet::new();
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let config = config.clone();
+                    let public = key.public_key().clone();
+                    sessions.spawn(async move {
+                        if let Ok(session) =
+                            server::run_stream(config, socket, IdentityServer(public)).await
+                        {
+                            let _ = session.await;
+                        }
+                    });
+                }
+            });
+            let identities = vec![identity.display().to_string()];
+            assert!(Session::connect(
+                "tester",
+                "",
+                ("127.0.0.1", address.port()),
+                file.0.clone(),
+                Some(public.clone()),
+                &identities,
+                "wrong-passphrase"
+            )
+            .await
+            .is_err());
+            let session = Session::connect(
+                "tester",
+                "",
+                ("127.0.0.1", address.port()),
+                file.0.clone(),
+                Some(public),
+                &identities,
+                "test-passphrase",
+            )
+            .await
+            .unwrap();
+            let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(local.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (socket, origin) = local.accept().await.unwrap();
+            let send = Arc::new(AtomicU64::new(0));
+            let recv = Arc::new(AtomicU64::new(0));
+            let (forwarded, received) = tokio::join!(
+                session.forward(
+                    socket,
+                    origin,
+                    ("database.internal".into(), 5432),
+                    send,
+                    recv.clone()
+                ),
+                async {
+                    let mut data = Vec::new();
+                    client.read_to_end(&mut data).await.unwrap();
+                    client.shutdown().await.unwrap();
+                    data
+                }
+            );
+            forwarded.unwrap();
+            assert_eq!(received, b"forwarded");
+            assert_eq!(recv.load(Ordering::Relaxed), 9);
+            session.close().await.unwrap();
+            server.abort();
+            let _ = server.await;
+            std::fs::remove_file(&identity).unwrap();
+            std::fs::remove_file(identity.with_extension("pub")).unwrap();
+        })
+        .await
+        .expect("local SSH identity test timed out");
+    }
+
     impl server::Handler for TestServer {
         type Error = anyhow::Error;
         async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<server::Auth> {
@@ -550,6 +724,8 @@ mod tests {
             ("127.0.0.1", address.port()),
             file.0.clone(),
             None,
+            &[],
+            "",
         )
         .await;
         let error = first.err().expect("unknown host must be rejected");
@@ -561,6 +737,8 @@ mod tests {
             ("127.0.0.1", address.port()),
             file.0.clone(),
             Some(public),
+            &[],
+            "",
         )
         .await
         .unwrap();
@@ -572,6 +750,8 @@ mod tests {
             ("127.0.0.1", address.port()),
             file.0.clone(),
             None,
+            &[],
+            "",
         )
         .await
         .unwrap();
@@ -584,7 +764,13 @@ mod tests {
         let send = Arc::new(AtomicU64::new(0));
         let recv = Arc::new(AtomicU64::new(0));
         let transferred = tokio::time::timeout(Duration::from_secs(5), async {
-            let forwarding = session.forward(socket, origin, address, send.clone(), recv.clone());
+            let forwarding = session.forward(
+                socket,
+                origin,
+                (address.ip().to_string(), address.port()),
+                send.clone(),
+                recv.clone(),
+            );
             let client_io = async {
                 client.write_all(b"hello").await.unwrap();
                 let mut echo = [0; 5];
@@ -637,6 +823,8 @@ mod tests {
                     ("127.0.0.1", address.port()),
                     file.0.clone(),
                     Some(public),
+                    &[],
+                    "",
                 )
                 .await
                 .unwrap(),
@@ -654,7 +842,7 @@ mod tests {
             let (socket, origin) = local.accept().await.unwrap();
             let send = Arc::new(AtomicU64::new(0));
             let recv = Arc::new(AtomicU64::new(0));
-            let target = SocketAddr::new(address.ip(), mode);
+            let target = (address.ip().to_string(), mode);
             if mode == 4 {
                 let worker_session = session.clone();
                 let worker_send = send.clone();

@@ -1,5 +1,6 @@
 mod commands;
 mod ssh;
+mod ssh_files;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,7 +16,15 @@ pub fn run() {
             commands::connect,
             commands::command,
             commands::forward,
-            commands::stop
+            commands::stop,
+            ssh_files::read_ssh_file,
+            ssh_files::save_ssh_file,
+            ssh_files::restore_ssh_file,
+            ssh_files::ssh_hosts,
+            ssh_files::resolve_ssh_host,
+            ssh_files::known_host_entries,
+            ssh_files::find_known_host,
+            ssh_files::change_known_hosts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

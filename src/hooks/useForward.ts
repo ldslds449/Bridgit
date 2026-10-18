@@ -19,6 +19,11 @@ type ForwardOptions = {
   remotePort: number;
   user: string;
   password: string;
+  alias?: string | null;
+  identityFile?: string | null;
+  passphrase?: string;
+  targetHost?: string;
+  targetPort?: number;
 };
 
 function errorMessage(error: unknown): string {
@@ -37,7 +42,7 @@ export function useForward() {
   );
   const busy = useRef(false);
   const stopVersion = useRef(0);
-  const errorTimer = useRef<ReturnType<typeof setTimeout>>();
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const listenersReady = useRef<Promise<void>>(Promise.resolve());
   const [chartData, setChartData] = useState({
     labels: new Array(ChartDataMaxSize).fill(""),

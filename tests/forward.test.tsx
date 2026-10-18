@@ -8,7 +8,8 @@ const hooks = vi.hoisted(() => ({
   effects: [] as (() => void | (() => void))[],
   cleanups: [] as (() => void)[],
 }));
-vi.mock("react", () => ({
+vi.mock("react", async (importOriginal) => ({
+  ...await importOriginal<typeof import("react")>(),
   useState(initial: any) {
     const index = hooks.cursor++;
     if (!(index in hooks.slots)) hooks.slots[index] = initial;
@@ -43,6 +44,17 @@ vi.mock("../src/ui/TransferChart", () => ({ default: () => null }));
 
 import { ConnectStatus, useForward } from "../src/hooks/useForward";
 import Forward from "../src/ui/Forward";
+import { useConfirmation } from "../src/component/useConfirmation";
+
+function findElement(node: any, predicate: (element: any) => boolean): any {
+  if (!node || typeof node !== "object") return undefined;
+  if (predicate(node)) return node;
+  const children = node.props?.children;
+  for (const child of Array.isArray(children) ? children.flat(Infinity) : [children]) {
+    const found = findElement(child, predicate);
+    if (found) return found;
+  }
+}
 
 function render<T>(component: () => T): T {
   hooks.cursor = 0;
@@ -89,10 +101,30 @@ test("Stop works after connected form fields are cleared", async () => {
   hooks.slots[5] = ""; // password field
   hooks.slots[6] = ConnectStatus.Connected;
   const page = render(Forward);
-  const form = (page.props as any).children[0];
+  const form = findElement(page, element => element.type === "form");
   form.props.onSubmit({ preventDefault() {} });
   await Promise.resolve();
   expect(ipc.invoke).toHaveBeenCalledWith("stop");
+});
+
+test("the redesigned form sends separate SSH and forwarding endpoints", async () => {
+  const page = render(Forward);
+  for (const [label, value] of [["主機名稱 / IP", "gateway.example.com"], ["使用者名稱", "alice"], ["登入密碼", "secret"], ["目的主機", "database.internal"], ["目的 Port", "5432"]]) {
+    findElement(page, element => element.props?.label === label).props.onChange(value);
+  }
+  findElement(render(Forward), element => element.type === "form").props.onSubmit({ preventDefault() {} });
+  await vi.waitFor(() => expect(ipc.invoke).toHaveBeenCalledWith("forward", expect.objectContaining({
+    remoteIp: "gateway.example.com", remotePort: 22, user: "alice", password: "secret",
+    targetHost: "database.internal", targetPort: 5432, localPort: 5678,
+  })));
+});
+
+test("an empty local port blocks submission instead of reusing the old value", () => {
+  const page = render(Forward);
+  findElement(page, element => element.props?.label === "本機 Port").props.onChange("");
+  findElement(render(Forward), element => element.type === "form").props.onSubmit({ preventDefault() {} });
+  expect(ipc.invoke).not.toHaveBeenCalledWith("forward", expect.anything());
+  expect(hooks.slots[7]).toBe("本機 Port 必須介於 1–65535");
 });
 
 test("stop failures are shown and allow a retry", async () => {
@@ -173,4 +205,27 @@ test("an immediate SSH disconnect is not overwritten by the start response", asy
   });
   await render(useForward).invokeForward(options);
   expect(render(useForward).connectStatus).toBe(ConnectStatus.Disconnected);
+});
+
+test("confirmation cancellation never approves the operation", async () => {
+  const state = render(useConfirmation);
+  const answer = state.confirm({ title: "Reset host", description: "Remove trust" });
+  const open = render(useConfirmation);
+  expect(open.dialog.props.isOpen).toBe(true);
+  open.dialog.props.onOpenChange(false);
+  expect(await answer).toBe(false);
+  expect(render(useConfirmation).dialog.props.isOpen).toBe(false);
+});
+
+test("clearing all trust requires the exact confirmation phrase", async () => {
+  const state = render(useConfirmation);
+  const answer = state.confirm({ title: "Clear trust", description: "Remove all", phrase: "RESET", confirmLabel: "Clear" });
+  let dialog = render(useConfirmation).dialog;
+  expect(findElement(dialog, element => element.props?.text === "Clear").props.disable).toBe(true);
+  findElement(dialog, element => element.props?.label === "輸入 RESET 確認").props.onChange("RESET");
+  dialog = render(useConfirmation).dialog;
+  const confirm = findElement(dialog, element => element.props?.text === "Clear");
+  expect(confirm.props.disable).toBe(false);
+  confirm.props.onClick();
+  expect(await answer).toBe(true);
 });
