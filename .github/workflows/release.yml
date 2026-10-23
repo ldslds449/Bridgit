@@ -1,0 +1,86 @@
+name: Release draft
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-draft
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package (${{ matrix.platform }})
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: --ci -- --locked
+          - platform: macos-latest
+            args: --ci --target universal-apple-darwin -- --locked
+          - platform: ubuntu-22.04
+            args: --ci -- --locked
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Check release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const version = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version;
+          assert.equal(JSON.parse(fs.readFileSync('package.json', 'utf8')).version, version, 'package.json version must match Tauri');
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+          assert.equal(cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1], version, 'Cargo.toml version must match Tauri');
+          if (process.env.RELEASE_TAG) assert.equal(process.env.RELEASE_TAG, `v${version}`, 'Tag must match the app version');
+          NODE
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Build installers and upload to draft
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }}
+          tagName: v__VERSION__
+          releaseName: SSH GUI v__VERSION__
+          releaseCommitish: ${{ github.sha }}
+          releaseBody: |
+            Download the installer for your platform below.
+
+            These builds are unsigned; the macOS app is not notarized.
+            Review the build results for all three platforms before publishing this draft.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: false
+          uploadWorkflowArtifacts: true
+          retryAttempts: 3
