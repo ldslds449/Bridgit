@@ -72,7 +72,7 @@ jobs:
           tauriScript: pnpm tauri
           args: ${{ matrix.args }}
           tagName: v__VERSION__
-          releaseName: SSH GUI v__VERSION__
+          releaseName: Bridgit v__VERSION__
           releaseCommitish: ${{ github.sha }}
           releaseBody: |
             Download the installer for your platform below.

@@ -25,7 +25,7 @@ export default function App() {
   return <div className="app-shell">
     <a href="#workspace" className="skip-link">跳到主要內容</a>
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><Terminal size={21} strokeWidth={2.3} /></span><span>SSH<span className="brand-light">desk</span><small>YOUR CONNECTION WORKSPACE</small></span></div>
+      <div className="brand"><span className="brand-mark"><Terminal size={21} strokeWidth={2.3} /></span><span>Bridgit<small>YOUR CONNECTION WORKSPACE</small></span></div>
       <div className="nav-caption">工作區 <span>WORKSPACE</span></div>
       <nav aria-label="主要功能" className="side-nav">
         {pages.map(item => <Button key={item.id} variant="ghost" className="nav-item" aria-label={item.label} data-active={page === item.id} aria-current={page === item.id ? "page" : undefined} onPress={() => setPage(item.id)}>
@@ -33,7 +33,7 @@ export default function App() {
         </Button>)}
       </nav>
       <div className="sidebar-footer"><div className="local-note"><HardDrive size={17} /><span>本機工作區<small>設定由你掌控</small></span><span className="status-dot" /></div>
-        <div className="sidebar-version"><span>SSHdesk <span className="mono">v0.1.0</span></span><ArrowUpRight size={13} /></div>
+        <div className="sidebar-version"><span>Bridgit <span className="mono">v0.1.1</span></span><ArrowUpRight size={13} /></div>
       </div>
     </aside>
     <div className="workspace-shell">

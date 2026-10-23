@@ -1,4 +1,4 @@
-# SSH GUI
+# Bridgit
 
 Desktop SSH application built with Tauri 2, React 19, HeroUI 3, Tailwind CSS 4, TypeScript, and Vite+.
 
@@ -23,7 +23,7 @@ Use `pnpm dev` for the frontend development server and `pnpm preview` to preview
 
 The **CI** workflow runs frontend tests, Rust tests, and a desktop release-mode compilation on Windows, macOS, and Linux for pull requests and pushes to `master`.
 
-To build installers, run **Actions → Release draft → Run workflow** on the desired branch, or push a version tag such as `v0.1.0`. The tag must match the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`; update all three before releasing a new version.
+To build installers, run **Actions → Release draft → Run workflow** on the desired branch, or push a version tag such as `v0.1.1`. The tag must match the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`; update all three before releasing a new version.
 
 The release workflow creates a **draft**, attaches Windows x64 installers, a universal macOS build (Intel and Apple Silicon), and Linux x64 packages, and also saves workflow artifacts. It uses the built-in `GITHUB_TOKEN`; no personal token is required. All three platform jobs must succeed before you review and publish the draft manually. Re-running the same version updates its draft assets; use a new version for a published release.
 
