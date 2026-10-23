@@ -41,6 +41,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
-      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      # Network fixtures rebind ephemeral ports; keep them from racing on macOS.
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
       - name: Compile desktop application
         run: pnpm tauri build --ci --no-bundle -- --locked
